@@ -1,19 +1,12 @@
 /*
- * Bitcoin Price Tracker - Phase 2: OLED + RGB LED
- * * ACTIVE FEATURES:
- * - Real-time Bitcoin price from Binance (HTTPS Fixed)
- * - OLED Display
- * - RGB LED Indicators (Green=Up, Red=Down, Blue=Stable)
- * * DISABLED FEATURES (Uncomment later):
- * - [LATER] Passive Buzzer (Audio alerts)
- * - [LATER] Photoresistor (Auto-mute)
- * - [LATER] Push Button (Manual Refresh)
- * * HARDWARE WIRING:
+ * Crypto Tracker v3.0 - Multi-Asset Support
+ * * NEW FEATURES:
+ * - Button on GPIO 23 switches assets (BTC -> ETH -> SOL)
+ * - Auto-reset LED logic when switching coins
+ * * * WIRING:
  * - OLED: SDA -> D21, SCL -> D22
- * - LED Red:   D15 (use 220 ohm resistor)
- * - LED Green: D2  (use 220 ohm resistor)
- * - LED Blue:  D4  (use 220 ohm resistor)
- * - LED Cathode: GND
+ * - Red LED: D15, Green LED: D2, Blue LED: D4
+ * - Button: One leg to D23, other leg to GND
  */
 
 #include <Wire.h>
@@ -21,7 +14,7 @@
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <WiFiClientSecure.h> // Required for Binance
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 
 // ==================== CONFIGURATION ====================
@@ -29,17 +22,22 @@
 const char* ssid = "SSID";        
 const char* password = "PASS"; 
 
-// --- PIN DEFINITIONS ---
-#define PIN_RED     15   // RGB LED Red pin
-#define PIN_GREEN   2    // RGB LED Green pin
-#define PIN_BLUE    4    // RGB LED Blue pin
+// --- ASSET CONFIGURATION ---
+// Array of symbols to track
+const char* assets[] = {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
+const char* assetNames[] = {"BTC", "ETH", "SOL"};
+const int totalAssets = 3;
+int currentAssetIndex = 0; // Start with BTC (Index 0)
 
-// [LATER] #define PIN_BUZZER  13   
-// [LATER] #define PIN_LDR     34   
-// [LATER] #define PIN_BUTTON  23   
+// --- PIN DEFINITIONS ---
+#define PIN_RED     15   
+#define PIN_GREEN   2    
+#define PIN_BLUE    4    
+#define PIN_BUTTON  23   // <-- NEW BUTTON PIN
 
 // --- TIMING ---
-unsigned long timerDelay = 15000; // Check every 15 seconds (Binance is fast)
+unsigned long timerDelay = 15000; 
+unsigned long lastTime = 0;      
 
 // --- DISPLAY ---
 #define SCREEN_WIDTH 128
@@ -49,142 +47,107 @@ unsigned long timerDelay = 15000; // Check every 15 seconds (Binance is fast)
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// --- API (BINANCE) ---
-const char* endpoint = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT";
-
 // ==================== GLOBAL VARIABLES ====================
 float lastPrice = 0.0;           
-unsigned long lastTime = 0;      
 
 // ==================== HELPER FUNCTIONS ====================
 
-/**
- * Set RGB LED color
- * Parameters: r, g, b (true = on, false = off)
- */
 void setLED(bool r, bool g, bool b) {
   digitalWrite(PIN_RED, r ? HIGH : LOW);
   digitalWrite(PIN_GREEN, g ? HIGH : LOW);
   digitalWrite(PIN_BLUE, b ? HIGH : LOW);
 }
 
-// [LATER] void playSuccessTone() { ... }
-// [LATER] void playFailTone() { ... }
-
-/**
- * Main function to fetch and display Bitcoin price data
- */
 void updateData() {
-  if(WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi Disconnected!");
-    return;
-  }
+  if(WiFi.status() != WL_CONNECTED) return;
 
-  // Visual indicator on screen that we are updating
-  display.fillRect(120, 0, 8, 8, WHITE); 
+  // Visual loading indicator
+  display.fillRect(118, 0, 10, 10, WHITE); 
   display.display();
 
-  Serial.println("\n--- Fetching Bitcoin Price ---");
+  // 1. Construct the API URL dynamically based on current asset
+  String url = "https://api.binance.com/api/v3/ticker/price?symbol=";
+  url += assets[currentAssetIndex];
+
+  Serial.print("Fetching: ");
+  Serial.println(assets[currentAssetIndex]);
   
   WiFiClientSecure client;
-  client.setInsecure(); // IGNORE SSL CERTIFICATE
+  client.setInsecure(); 
   
   HTTPClient http;
-  http.setUserAgent("Mozilla/5.0 (ESP32)"); // PREVENT BLOCKING
-  http.begin(client, endpoint);
+  http.setUserAgent("Mozilla/5.0 (ESP32)"); 
+  http.begin(client, url); // Use dynamic URL
   
   int httpResponseCode = http.GET();
   
   if (httpResponseCode > 0) {
     String payload = http.getString();
-    
-    // Parse JSON (Binance format)
     StaticJsonDocument<768> doc;
     DeserializationError error = deserializeJson(doc, payload);
 
     if (!error) {
-      // Binance returns price as a String, convert to Float for math
       String priceStrRaw = doc["price"];
       float currentPrice = priceStrRaw.toFloat();
       
-      // Format string for display (2 decimal places)
+      // Format price (2 decimals)
       char priceString[20];
       sprintf(priceString, "%.2f", currentPrice);
 
-      Serial.print("Price: $");
-      Serial.println(priceString);
-      
-      // ===== LED LOGIC (Active) =====
-      setLED(false, false, false); // Reset
+      // ===== LED LOGIC =====
+      setLED(false, false, false); 
 
       if (lastPrice == 0.0) {
-        // First run - BLUE
-        setLED(false, false, true); 
-        Serial.println("Status: Initializing");
+        setLED(false, false, true); // Blue (New Asset/Init)
       } 
       else if (currentPrice > lastPrice) {
-        // Price UP - GREEN
-        setLED(false, true, false);
-        // [LATER] playSuccessTone();
-        Serial.println("Status: UP -> GREEN");
+        setLED(false, true, false); // Green
       } 
       else if (currentPrice < lastPrice) {
-        // Price DOWN - RED
-        setLED(true, false, false);
-        // [LATER] playFailTone();
-        Serial.println("Status: DOWN -> RED");
+        setLED(true, false, false); // Red
       } 
       else {
-        // No change - BLUE
-        setLED(false, false, true);
-        Serial.println("Status: Stable -> BLUE");
+        setLED(false, false, true); // Blue
       }
 
-      // ===== DISPLAY UPDATE =====
+      // ===== DISPLAY =====
       display.clearDisplay();
       
-      display.setTextSize(1);
+      // Top Left: Asset Name
+      display.setTextSize(2);
       display.setCursor(0, 0);
-      display.print("BTC LIVE");
+      display.print(assetNames[currentAssetIndex]); 
       
-      // Divider
-      display.drawLine(0, 10, 128, 10, WHITE);
+      // Top Right: "LIVE" text small
+      display.setTextSize(1);
+      display.setCursor(100, 4);
+      display.print("LIVE");
+
+      display.drawLine(0, 18, 128, 18, WHITE);
       
       // Price
       display.setTextSize(2);
-      display.setCursor(0, 20);
+      display.setCursor(0, 25);
       display.print("$");
-      // Print the formatted string to avoid scientific notation
       display.println(priceString); 
 
-      // Change Indicator
+      // Bottom: Trend
       display.setTextSize(1);
       display.setCursor(0, 50);
-      
       if (lastPrice != 0.0) {
         float diff = currentPrice - lastPrice;
         if (diff > 0) display.print("+$");
-        else if (diff < 0) display.print("-$"); // Minus sign handled manually?
-        
-        display.print(abs(diff), 2);
+        else if (diff < 0) display.print(""); 
+        display.print(diff, 2);
       } else {
-        display.println("Waiting trend...");
+        display.print("Tracking...");
       }
       
       display.display();
-      
       lastPrice = currentPrice;
       
-    } else {
-      Serial.print("JSON Error: ");
-      Serial.println(error.c_str());
     }
   } 
-  else {
-    Serial.print("HTTP Error: ");
-    Serial.println(httpResponseCode);
-  }
-  
   http.end();
 }
 
@@ -192,55 +155,32 @@ void updateData() {
 
 void setup() {
   Serial.begin(115200);
-  delay(100);
 
-  // --- Setup Pins ---
   pinMode(PIN_RED, OUTPUT);
   pinMode(PIN_GREEN, OUTPUT);
   pinMode(PIN_BLUE, OUTPUT);
   
-  // [LATER] pinMode(PIN_BUZZER, OUTPUT);
-  // [LATER] pinMode(PIN_LDR, INPUT);
-  // [LATER] pinMode(PIN_BUTTON, INPUT_PULLUP);
-  
-  // Test LEDs (Red -> Green -> Blue)
-  setLED(true, false, false); delay(200);
-  setLED(false, true, false); delay(200);
-  setLED(false, false, true); delay(200);
-  setLED(false, false, false);
-  
-  // --- Initialize Display ---
+  // Setup Button: INPUT_PULLUP means we don't need a physical resistor
+  pinMode(PIN_BUTTON, INPUT_PULLUP); 
+
+  // Init Display
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) { 
-    Serial.println(F("SSD1306 allocation failed"));
     for(;;);
   }
-  
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("System Starting...");
+  display.setCursor(0,0);
+  display.println("Connecting...");
   display.display();
 
-  // --- Connect to WiFi ---
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
-  
+  // WiFi
   WiFi.begin(ssid, password);
-  
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
   }
-  
-  Serial.println("\nWiFi Connected!");
-  
-  display.clearDisplay();
-  display.println("WiFi OK!");
-  display.display();
-  delay(1000);
 
-  // Perform initial data fetch
+  // Initial Fetch
   updateData();
   lastTime = millis();
 }
@@ -248,24 +188,39 @@ void setup() {
 // ==================== MAIN LOOP ====================
 
 void loop() {
-  // 1. Automatic Timer Update
+  // 1. BUTTON LOGIC (Check if pressed)
+  // digitalRead is LOW when pressed because we used INPUT_PULLUP
+  if (digitalRead(PIN_BUTTON) == LOW) {
+    Serial.println("Button Pressed! Switching Asset...");
+    
+    // Move to next asset
+    currentAssetIndex++;
+    if (currentAssetIndex >= totalAssets) {
+      currentAssetIndex = 0; // Loop back to start
+    }
+    
+    // Show "Switching" on screen
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(10, 25);
+    display.print(assetNames[currentAssetIndex]);
+    display.display();
+    
+    // IMPORTANT: Reset lastPrice so we don't compare BTC price to ETH price
+    lastPrice = 0.0;
+    
+    // Debounce: Wait a bit, then wait for release
+    delay(200); 
+    while(digitalRead(PIN_BUTTON) == LOW); // Wait until user lets go
+    
+    // Update immediately
+    updateData();
+    lastTime = millis(); // Reset timer
+  }
+
+  // 2. AUTOMATIC TIMER
   if ((millis() - lastTime) > timerDelay) {
     updateData();
     lastTime = millis();
   }
-
-  // [LATER] 2. Manual Button Logic
-  /*
-  if (digitalRead(PIN_BUTTON) == LOW) {
-    display.clearDisplay();
-    display.setCursor(0, 20);
-    display.println("Refreshing...");
-    display.display();
-    updateData();
-    lastTime = millis();
-    while(digitalRead(PIN_BUTTON) == LOW); // Wait for release
-  }
-  */
-  
-  delay(100);
 }
